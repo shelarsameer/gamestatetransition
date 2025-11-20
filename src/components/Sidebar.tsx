@@ -17,7 +17,7 @@ const navigationItems = [
 export function Sidebar({ activeModule, onModuleChange }: SidebarProps) {
   return (
     <aside className="fixed left-0 top-16 h-[calc(100vh-4rem)] w-64 bg-white border-r border-gray-200 p-4">
-      <nav className="space-y-2">
+      <nav className="space-y-2 pt-8">
         {navigationItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeModule === item.id;

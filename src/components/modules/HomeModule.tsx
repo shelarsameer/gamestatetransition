@@ -9,7 +9,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 export function HomeModule() {
   const [gstFile, setGstFile] = useState<File | null>(null);
   const [tallyFile, setTallyFile] = useState<File | null>(null);
-  const [selectedMonth, setSelectedMonth] = useState('Jun');
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [gstHeaders, setGstHeaders] = useState<string[]>([]);
   const [tallyHeaders, setTallyHeaders] = useState<string[]>([]);
@@ -92,6 +91,7 @@ export function HomeModule() {
       alert(`Failed to upload files: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsUploading(false);
+      console.log('Upload complete');
     }
   };
 
@@ -101,32 +101,87 @@ export function HomeModule() {
     if (source === 'gst') {
       setGstHeaderRow(rowNum);
       if (gstAllData[rowIndex]) {
-        const newHeaders = Object.keys(gstAllData[rowIndex]);
+        // Get the column names from the current parsed data structure
+        const currentColumnNames = Object.keys(gstAllData[rowIndex]);
+        // Get the values from the selected row to use as new headers
+        const selectedRow = gstAllData[rowIndex];
+        const newHeaders = currentColumnNames.map(col => String(selectedRow[col]));
         setGstHeaders(newHeaders);
-        // Initialize column mapping with empty strings (to be filled by user)
+        // Reset mappings when header row changes
         setGstColumnMapping(new Array(newHeaders.length).fill(''));
-        // Update preview to show data after header row
-        setGstPreview(gstAllData.slice(rowIndex + 1, rowIndex + 6));
       }
     } else {
       setTallyHeaderRow(rowNum);
       if (tallyAllData[rowIndex]) {
-        const newHeaders = Object.keys(tallyAllData[rowIndex]);
+        // Get the column names from the current parsed data structure
+        const currentColumnNames = Object.keys(tallyAllData[rowIndex]);
+        // Get the values from the selected row to use as new headers
+        const selectedRow = tallyAllData[rowIndex];
+        const newHeaders = currentColumnNames.map(col => String(selectedRow[col]));
         setTallyHeaders(newHeaders);
-        // Initialize column mapping (not used in new UI, but keep for compatibility)
+        // Reset mappings when header row changes
         setTallyColumnMapping(new Array(newHeaders.length).fill(''));
-        // Update preview to show data after header row
-        setTallyPreview(tallyAllData.slice(rowIndex + 1, rowIndex + 6));
       }
     }
   };
 
-  const handleStartReconciliation = async () => {
+  const initializeDefaultMappings = () => {
+    // Helper function to find best matching column (case-insensitive, ignoring special chars)
+    const findMatchingColumn = (searchTerms: string[], availableColumns: string[]): string | null => {
+      for (const term of searchTerms) {
+        // Normalize search term: lowercase and remove special chars
+        const normalizedTerm = term.toLowerCase().replace(/[^a-z0-9]/g, '');
+        
+        for (const col of availableColumns) {
+          // Normalize column name: lowercase and remove special chars
+          const normalizedCol = col.toLowerCase().replace(/[^a-z0-9]/g, '');
+          
+          if (normalizedCol === normalizedTerm || normalizedCol.includes(normalizedTerm)) {
+            return col;
+          }
+        }
+      }
+      return null;
+    };
+
+    const defaultMappings = [
+      { gst: ['GSTIN of supplier', 'gstin'], tally: ['GSTIN', 'gstin'] },
+      { gst: ['Invoice number', 'invoice number', 'inv no'], tally: ['2B Invoice No', '2b invoice no', 'invoice no'] },
+      { gst: ['Invoice Date', 'invoice date', 'date'], tally: ['Invoice Date', 'invoice date', 'date'] },
+      { gst: ['Taxable Value', 'taxable value', 'taxable'], tally: ['Taxable Value', 'taxable value', 'taxable'] },
+      { gst: ['Integrated Tax', 'integrated tax', 'igst'], tally: ['IGST', 'igst', 'integrated tax'] },
+      { gst: ['Central Tax', 'central tax', 'cgst'], tally: ['CGST', 'cgst', 'central tax'] },
+      { gst: ['State/UT Tax', 'state tax', 'sgst'], tally: ['SGST', 'sgst', 'state tax'] }
+    ];
+
+    const gstMappings: string[] = [];
+    const tallyMappings: string[] = [];
+
+    // Try to match all default mappings with flexible matching
+    defaultMappings.forEach(mapping => {
+      const gstMatch = findMatchingColumn(mapping.gst, gstHeaders);
+      const tallyMatch = findMatchingColumn(mapping.tally, tallyHeaders);
+      
+      if (gstMatch && tallyMatch) {
+        gstMappings.push(gstMatch);
+        tallyMappings.push(tallyMatch);
+      } else {
+        gstMappings.push('');
+        tallyMappings.push('');
+      }
+    });
+
+    setGstColumnMapping(gstMappings);
+    setTallyColumnMapping(tallyMappings);
+    setNumMappingPairs(7);
+  };
+
+  const handleSaveMapping = async () => {
     if (!uploadId) return;
 
     setReconciliationInProgress(true);
     try {
-      const response = await fetch('/api/reconcile', {
+      const response = await fetch('/api/save-mapping', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -138,15 +193,31 @@ export function HomeModule() {
         })
       });
 
-      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const text = await response.text();
+      if (!text) {
+        throw new Error('Empty response from server');
+      }
+
+      const data = JSON.parse(text);
       
       if (data.success) {
-        // Navigate to results page
-        window.location.href = `/results/${data.resultId}`;
+        alert('Mapping saved successfully! Log ID: ' + data.logId);
+        // Reset the form
+        setShowColumnMapping(false);
+        setShowHeaderSelection(false);
+        setGstFile(null);
+        setTallyFile(null);
+        setUploadId(null);
+      } else {
+        alert('Failed to save mapping: ' + (data.error || 'Unknown error'));
       }
     } catch (error) {
-      console.error('Reconciliation error:', error);
-      alert(`Failed to start reconciliation: ${error instanceof Error ? error.message : String(error)}`);
+      console.error('Save mapping error:', error);
+      alert(`Failed to save mapping: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setReconciliationInProgress(false);
     }
@@ -170,44 +241,9 @@ export function HomeModule() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl text-gray-900">Welcome to FinGuru GST Recon</h2>
-          <p className="text-gray-600">Your intelligent GST reconciliation platform</p>
-        </div>
-        <Select value={selectedMonth} onValueChange={setSelectedMonth}>
-          <SelectTrigger className="w-48">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="Jan">January 2024</SelectItem>
-            <SelectItem value="Feb">February 2024</SelectItem>
-            <SelectItem value="Mar">March 2024</SelectItem>
-            <SelectItem value="Apr">April 2024</SelectItem>
-            <SelectItem value="May">May 2024</SelectItem>
-            <SelectItem value="Jun">June 2024</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-
-      {/* Quick Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        {quickStats.map((stat) => {
-          const Icon = stat.icon;
-          return (
-            <Card key={stat.label}>
-              <CardContent className="p-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-gray-600">{stat.label}</p>
-                    <p className="text-2xl text-gray-900 mt-1">{stat.value}</p>
-                  </div>
-                  <Icon className={`h-8 w-8 text-${stat.color}-600`} />
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
+      <div>
+        <h2 className="text-2xl text-gray-900">Welcome to FinGuru GST Recon</h2>
+        <p className="text-gray-600">Your intelligent GST reconciliation platform</p>
       </div>
 
       {/* File Upload Section */}
@@ -321,14 +357,14 @@ export function HomeModule() {
                   Back
                 </Button>
                 <Button
-                  className="bg-blue-600 hover:bg-blue-700"
+                  className="bg-green-600 hover:bg-green-700"
                   disabled={
                     !gstColumnMapping.some((m: string, idx: number) => m && tallyColumnMapping[idx]) || 
                     reconciliationInProgress
                   }
-                  onClick={handleStartReconciliation}
+                  onClick={handleSaveMapping}
                 >
-                  {reconciliationInProgress ? 'Processing...' : 'Start Reconciliation'}
+                  {reconciliationInProgress ? 'Saving...' : 'Save Mapping'}
                 </Button>
               </div>
             </div>
@@ -346,7 +382,7 @@ export function HomeModule() {
                 <div className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      GST File - Header Row
+                      GST 2B File Upload
                     </label>
                     <Select value={gstHeaderRow} onValueChange={(val: string) => handleHeaderRowChange('gst', val)}>
                       <SelectTrigger>
@@ -364,16 +400,23 @@ export function HomeModule() {
                   </div>
 
                   <div className="border rounded-lg p-3 bg-gray-50">
-                    <p className="text-xs font-medium text-gray-700 mb-2">Preview of Row {gstHeaderRow}:</p>
-                    <div className="text-xs text-gray-600 space-y-1 max-h-24 overflow-y-auto">
-                      {gstAllData[parseInt(gstHeaderRow) - 1] && 
-                        Object.entries(gstAllData[parseInt(gstHeaderRow) - 1]).map(([key, value]: [string, any]) => (
-                          <div key={key} className="truncate">
-                            <strong>{key}:</strong> {String(value).substring(0, 30)}
-                          </div>
-                        ))
-                      }
+                    <p className="text-xs font-medium text-gray-700 mb-2">Columns in Row {gstHeaderRow}:</p>
+                    <div className="text-xs text-gray-600 space-y-1 max-h-32 overflow-y-auto">
+                      {gstHeaders.map((col: string) => (
+                        <div key={col} className="truncate">
+                          • {col}
+                        </div>
+                      ))}
                     </div>
+                  </div>
+
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-xs text-blue-900">
+                      <strong>Total Columns:</strong> {gstHeaders.length}
+                    </p>
+                    <p className="text-xs text-blue-900">
+                      <strong>Total Rows:</strong> {gstAllData.length - parseInt(gstHeaderRow)}
+                    </p>
                   </div>
                 </div>
 
@@ -399,16 +442,23 @@ export function HomeModule() {
                   </div>
 
                   <div className="border rounded-lg p-3 bg-gray-50">
-                    <p className="text-xs font-medium text-gray-700 mb-2">Preview of Row {tallyHeaderRow}:</p>
-                    <div className="text-xs text-gray-600 space-y-1 max-h-24 overflow-y-auto">
-                      {tallyAllData[parseInt(tallyHeaderRow) - 1] && 
-                        Object.entries(tallyAllData[parseInt(tallyHeaderRow) - 1]).map(([key, value]) => (
-                          <div key={key} className="truncate">
-                            <strong>{key}:</strong> {String(value).substring(0, 30)}
-                          </div>
-                        ))
-                      }
+                    <p className="text-xs font-medium text-gray-700 mb-2">Columns in Row {tallyHeaderRow}:</p>
+                    <div className="text-xs text-gray-600 space-y-1 max-h-32 overflow-y-auto">
+                      {tallyHeaders.map((col: string) => (
+                        <div key={col} className="truncate">
+                          • {col}
+                        </div>
+                      ))}
                     </div>
+                  </div>
+
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-xs text-blue-900">
+                      <strong>Total Columns:</strong> {tallyHeaders.length}
+                    </p>
+                    <p className="text-xs text-blue-900">
+                      <strong>Total Rows:</strong> {tallyAllData.length - parseInt(tallyHeaderRow)}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -429,6 +479,7 @@ export function HomeModule() {
                   className="bg-blue-600 hover:bg-blue-700"
                   onClick={() => {
                     console.log('Clicking Next: Column Mapping');
+                    initializeDefaultMappings();
                     setShowColumnMapping(true);
                   }}
                 >
@@ -443,13 +494,13 @@ export function HomeModule() {
                 {/* GST File Upload */}
                 <div className="space-y-3">
                   <label className="block">
-                    <span className="text-sm text-gray-700">GST File Upload (GSTR-2A)</span>
+                    <span className="text-sm text-gray-700">GST 2B File Upload</span>
                     <div className="mt-2 flex justify-center px-6 pt-8 pb-8 border-2 border-gray-300 border-dashed rounded-lg hover:border-blue-500 transition-colors cursor-pointer bg-gray-50 hover:bg-blue-50">
                       <div className="space-y-2 text-center">
                         <Upload className="mx-auto h-10 w-10 text-gray-400" />
                         <div className="flex text-sm text-gray-600">
                           <label className="relative cursor-pointer rounded-md font-medium text-blue-600 hover:text-blue-500">
-                            <span>Upload GST file</span>
+                            <span>Upload GST 2B file</span>
                             <input
                               type="file"
                               className="sr-only"

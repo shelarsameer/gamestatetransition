@@ -36,6 +36,21 @@ export async function initializeDatabase(pool) {
       )
     `);
 
+    // Create mapping_logs table to store saved mappings with their data
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS mapping_logs (
+        id SERIAL PRIMARY KEY,
+        upload_id INTEGER REFERENCES uploads(id),
+        gst_columns TEXT[] NOT NULL,
+        tally_columns TEXT[] NOT NULL,
+        gst_header_row INTEGER DEFAULT 1,
+        tally_header_row INTEGER DEFAULT 1,
+        gst_table_name TEXT NOT NULL,
+        tally_table_name TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
     console.log('Database initialized successfully');
   } catch (error) {
     console.error('Database initialization error:', error);

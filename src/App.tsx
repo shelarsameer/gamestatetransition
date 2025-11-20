@@ -4,6 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { Footer } from './components/Footer';
 import { Login } from './components/Login';
 import { HomeModule } from './components/modules/HomeModule';
+import { GSTReconModule } from './components/modules/GSTReconModule';
 import { ReconciliationResultsModule } from './components/modules/ReconciliationResultsModule';
 import { AnalyticsModule } from './components/modules/AnalyticsModule';
 import { ChatModule } from './components/modules/ChatModule';
@@ -37,13 +38,20 @@ export default function App() {
   }
 
   if (!isLoggedIn) {
-    return <Login onLogin={handleLogin} />;
+    return (
+      <div>
+        <Login onLogin={handleLogin} />
+        <Footer />
+      </div>
+    );
   }
 
   const renderActiveModule = () => {
     switch (activeModule) {
       case 'home':
         return <HomeModule />;
+      case 'gst-recon':
+        return <GSTReconModule />;
       case 'results':
         return resultId ? <ReconciliationResultsModule resultId={resultId} /> : <HomeModule />;
       case 'analytics':
@@ -66,7 +74,6 @@ export default function App() {
           {renderActiveModule()}
         </main>
       </div>
-      <Footer />
     </div>
   );
 }

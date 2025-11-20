@@ -452,6 +452,204 @@ async function storeMappedData(pool, reconciliationId, gstData, tallyData, gstCo
   }
 }
 
+// Get all mapping logs
+app.get('/api/mapping-logs', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM mapping_logs ORDER BY created_at DESC');
+    res.json({ logs: result.rows });
+  } catch (error) {
+    console.error('Error fetching mapping logs:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete mapping log
+app.delete('/api/mapping-logs/:logId', async (req, res) => {
+  try {
+    const { logId } = req.params;
+    
+    // Get the log to find table names
+    const logResult = await pool.query('SELECT gst_table_name, tally_table_name FROM mapping_logs WHERE id = $1', [logId]);
+    if (logResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Log not found' });
+    }
+
+    const { gst_table_name, tally_table_name } = logResult.rows[0];
+
+    // Drop the tables
+    await pool.query(`DROP TABLE IF EXISTS ${gst_table_name}`);
+    await pool.query(`DROP TABLE IF EXISTS ${tally_table_name}`);
+
+    // Delete the log
+    await pool.query('DELETE FROM mapping_logs WHERE id = $1', [logId]);
+
+    res.json({ success: true, message: 'Mapping log deleted' });
+  } catch (error) {
+    console.error('Error deleting mapping log:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Export mapping log data
+app.get('/api/export-log/:logId', async (req, res) => {
+  try {
+    const { logId } = req.params;
+    
+    const logResult = await pool.query('SELECT gst_table_name, tally_table_name FROM mapping_logs WHERE id = $1', [logId]);
+    if (logResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Log not found' });
+    }
+
+    const { gst_table_name, tally_table_name } = logResult.rows[0];
+
+    // Get data from both tables
+    const gstResult = await pool.query(`SELECT * FROM ${gst_table_name}`);
+    const tallyResult = await pool.query(`SELECT * FROM ${tally_table_name}`);
+
+    // Create CSV content
+    let csvContent = 'GST 2B Data\n';
+    if (gstResult.rows.length > 0) {
+      const headers = Object.keys(gstResult.rows[0]).join(',');
+      csvContent += headers + '\n';
+      gstResult.rows.forEach(row => {
+        const values = Object.values(row).map(v => `"${v}"`).join(',');
+        csvContent += values + '\n';
+      });
+    }
+
+    csvContent += '\n\nTally Data\n';
+    if (tallyResult.rows.length > 0) {
+      const headers = Object.keys(tallyResult.rows[0]).join(',');
+      csvContent += headers + '\n';
+      tallyResult.rows.forEach(row => {
+        const values = Object.values(row).map(v => `"${v}"`).join(',');
+        csvContent += values + '\n';
+      });
+    }
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="mapping_log_${logId}.csv"`);
+    res.send(csvContent);
+  } catch (error) {
+    console.error('Error exporting mapping log:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Save mapping endpoint - stores mapped data in tables and creates a log
+app.post('/api/save-mapping', async (req, res) => {
+  try {
+    const { uploadId, gstColumns, tallyColumns, gstHeaderRow, tallyHeaderRow } = req.body;
+
+    if (!uploadId || !gstColumns || !tallyColumns) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    // Get upload data
+    const uploadResult = await pool.query('SELECT gst_data, tally_data FROM uploads WHERE id = $1', [uploadId]);
+    if (uploadResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Upload not found' });
+    }
+
+    const { gst_data, tally_data } = uploadResult.rows[0];
+    const gstData = typeof gst_data === 'string' ? JSON.parse(gst_data) : gst_data;
+    const tallyData = typeof tally_data === 'string' ? JSON.parse(tally_data) : tally_data;
+
+    // Filter out empty mappings
+    const validMappings = gstColumns
+      .map((gstCol, idx) => ({
+        gstCol,
+        tallyCol: tallyColumns[idx],
+        featureNum: idx + 1
+      }))
+      .filter(m => m.gstCol && m.tallyCol);
+
+    if (validMappings.length === 0) {
+      return res.status(400).json({ error: 'No valid column mappings found' });
+    }
+
+    // Create dynamic table names
+    const logId = Date.now();
+    const gstTableName = `gst_mapped_log_${logId}`;
+    const tallyTableName = `tally_mapped_log_${logId}`;
+
+    // Create GST table
+    const gstColumns_sql = validMappings
+      .map(m => `feature${m.featureNum} TEXT`)
+      .join(', ');
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ${gstTableName} (
+        id SERIAL PRIMARY KEY,
+        ${gstColumns_sql},
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create Tally table
+    const tallyColumns_sql = validMappings
+      .map(m => `feature${m.featureNum} TEXT`)
+      .join(', ');
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ${tallyTableName} (
+        id SERIAL PRIMARY KEY,
+        ${tallyColumns_sql},
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Skip rows before header row
+    const gstDataFiltered = gstData.slice(gstHeaderRow - 1);
+    const tallyDataFiltered = tallyData.slice(tallyHeaderRow - 1);
+
+    // Insert GST data
+    for (const row of gstDataFiltered) {
+      const values = validMappings.map(m => normalizeValueForDB(row[m.gstCol] || null));
+      const placeholders = validMappings.map((_, i) => `$${i + 1}`).join(', ');
+      const featureNames = validMappings.map(m => `feature${m.featureNum}`).join(', ');
+
+      await pool.query(
+        `INSERT INTO ${gstTableName} (${featureNames}, created_at) VALUES (${placeholders}, NOW())`,
+        values
+      );
+    }
+
+    // Insert Tally data
+    for (const row of tallyDataFiltered) {
+      const values = validMappings.map(m => normalizeValueForDB(row[m.tallyCol] || null));
+      const placeholders = validMappings.map((_, i) => `$${i + 1}`).join(', ');
+      const featureNames = validMappings.map(m => `feature${m.featureNum}`).join(', ');
+
+      await pool.query(
+        `INSERT INTO ${tallyTableName} (${featureNames}, created_at) VALUES (${placeholders}, NOW())`,
+        values
+      );
+    }
+
+    // Store mapping log
+    const logResult = await pool.query(
+      `INSERT INTO mapping_logs (upload_id, gst_columns, tally_columns, gst_header_row, tally_header_row, gst_table_name, tally_table_name, created_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING id`,
+      [uploadId, gstColumns, tallyColumns, gstHeaderRow, tallyHeaderRow, gstTableName, tallyTableName]
+    );
+
+    const savedLogId = logResult.rows[0].id;
+    console.log(`Mapping saved successfully. Log ID: ${savedLogId}, Tables: ${gstTableName}, ${tallyTableName}`);
+
+    return res.status(200).json({
+      success: true,
+      logId: savedLogId,
+      gstTableName,
+      tallyTableName,
+      message: 'Mapping saved successfully'
+    });
+  } catch (error) {
+    console.error('Save mapping error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err);
